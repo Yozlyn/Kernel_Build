@@ -1,0 +1,254 @@
+name: OnePlus13
+
+on:
+  workflow_dispatch:
+    inputs:
+      FILE:
+        description: "Select configuration"
+        required: true
+        default: oneplus_13_b
+      KERNEL_TIME:
+        description: "Build date"
+        required: true
+        default: '2025-09-19 06:13:40 UTC'
+      KERNEL_NAME:
+        description: "Kernel name"
+        required: true
+        default: '-android15-8-gf4dc45704e54-abogki446052083-4k'
+      TARGET_KSU_VERSION:
+        description: "KSU Version (Leave empty for latest)"
+        required: false
+        default: ''
+      Release:
+        description: "Create Release"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: '0 6 * * 0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ inputs.FILE || 'Scheduled Build' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Environment Setup
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+              echo "FILE=oneplus_13_b" >> $GITHUB_ENV
+              echo "KERNEL_TIME=$(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_ENV
+              echo "KERNEL_NAME=-android15-8-g29d86c5fc9dd-abogki428889875-4k" >> $GITHUB_ENV
+              echo "RELEASE=true" >> $GITHUB_ENV
+              echo "TARGET_KSU_VERSION=" >> $GITHUB_ENV
+          else
+              echo "FILE=${{ inputs.FILE }}" >> $GITHUB_ENV
+              echo "KERNEL_TIME=${{ inputs.KERNEL_TIME }}" >> $GITHUB_ENV
+              echo "KERNEL_NAME=${{ inputs.KERNEL_NAME }}" >> $GITHUB_ENV
+              echo "RELEASE=${{ inputs.Release }}" >> $GITHUB_ENV
+              echo "TARGET_KSU_VERSION=${{ inputs.TARGET_KSU_VERSION }}" >> $GITHUB_ENV
+          fi
+          
+          cat >> $GITHUB_ENV <<EOF
+          WORKSPACE=$GITHUB_WORKSPACE/kernel_workspace
+          PLATFORM=$GITHUB_WORKSPACE/kernel_workspace/kernel_platform
+          COMMON=$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common
+          DEFCONFIG=$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common/arch/arm64/configs/gki_defconfig
+          CCACHE_DIR=$GITHUB_WORKSPACE/.ccache
+          EOF
+
+      - name: Set Device Name
+        run: |
+          DEVICE=$(echo "${{ env.FILE }}" | sed -E 's/^.*oneplus_([0-9]+)([a-z]*).*$/OnePlus\1\U\2/; s/_pro/Pro/i')
+          echo "DEVICE=$DEVICE" >> $GITHUB_ENV
+          
+      - name: Install Tools
+        run: |
+          sudo curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+x /usr/local/bin/repo
+          sudo apt-get install ccache
+          sudo rm -rf /usr/share/dotnet
+
+          git config --global user.name "build"
+          git config --global user.email "build@example.com"
+
+      - name: Cache repo metadata
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WORKSPACE }}/.repo
+          key: repo-metadata-${{ runner.os }}-${{ env.FILE }}
+          restore-keys: |
+            repo-metadata-${{ runner.os }}-${{ env.FILE }}-
+            repo-metadata-${{ runner.os }}-
+      
+      - name: Repo Sync
+        run: |
+          mkdir -p "$WORKSPACE" && cd "$WORKSPACE"
+          if [ ! -d .repo ]; then
+            repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m ${{ env.FILE }}.xml --depth=1
+          fi
+          repo sync -c --no-tags -j$(nproc --all)
+      
+      - name: Generate source hash
+        id: source_hash
+        run: |
+          cd "$COMMON"
+          SOURCE_HASH=$(git rev-parse HEAD | cut -c1-8)
+          echo "hash=$SOURCE_HASH" >> $GITHUB_OUTPUT
+          echo "Source commit hash: $SOURCE_HASH"
+          
+      - name: Cache ccache files
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ env.FILE }}-${{ steps.source_hash.outputs.hash }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ env.FILE }}-${{ steps.source_hash.outputs.hash }}-
+            ccache-${{ runner.os }}-${{ env.FILE }}-
+
+      - name: Setup ccache
+        run: |
+          export CCACHE_DIR="$CCACHE_DIR"
+          
+          ccache -o base_dir=$GITHUB_WORKSPACE
+          ccache -o cache_dir=$CCACHE_DIR
+          ccache -o hard_link=true
+          ccache -o max_size=3G
+          ccache -o compression=false
+          ccache -o sloppiness=time_macros,include_file_mtime
+          ccache -o depend_mode=true
+          ccache -o hash_dir=false
+          ccache -o compiler_check=none
+          
+          if [ "$(ls -A $CCACHE_DIR 2>/dev/null)" ]; then
+            echo "Cache restored: $(du -sh $CCACHE_DIR | cut -f1)"
+          else
+            echo "Empty cache(first build)"
+          fi
+
+          ccache -z
+
+      - name: Patch & Configure
+        run: |
+          cd "$PLATFORM"
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+          
+          cd "$PLATFORM/KernelSU"
+          KSU_VERSION=$(($(git rev-list --count main) + 40000 - 2815))
+          
+          if [ -n "${{ env.TARGET_KSU_VERSION }}" ]; then
+            TARGET_VER="${{ env.TARGET_KSU_VERSION }}"
+            echo "收到指定版本: $TARGET_VER"
+            
+            TARGET_COUNT=$((TARGET_VER - 40000 + 2815))
+            CURRENT_COUNT=$(git rev-list --count main)
+            OFFSET=$((CURRENT_COUNT - TARGET_COUNT))
+            
+            if [ $OFFSET -lt 0 ]; then
+                echo "Error: 目标版本 $TARGET_VER 比当前 HEAD 还要新。"
+                exit 1
+            fi
+            
+            git checkout main~$OFFSET
+            
+            KSU_VERSION=$TARGET_VER
+          else
+            echo "使用最新版本: $KSU_VERSION"
+          fi
+          
+          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          
+          cd "$WORKSPACE"
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 --depth=1
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch "$COMMON/"
+          cp -r susfs4ksu/kernel_patches/fs/* "$COMMON/fs/"
+          cp -r susfs4ksu/kernel_patches/include/linux/* "$COMMON/include/linux/"
+          cd "$COMMON" && patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch
+
+          curl -LO https://raw.githubusercontent.com/Numbersf/SCHED_PATCH/refs/heads/sm8750/fengchi_oneplus_13_b.patch \
+               -LO https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/hooks/scope_min_manual_hooks_v1.6.patch
+          patch -p1 -F 3 < fengchi_oneplus_13_b.patch
+          patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch
+
+          rm -f $PLATFORM/common/android/abi_gki_protected_exports_* \
+                $PLATFORM/msm-kernel/android/abi_gki_protected_exports_*
+
+          sed -i 's/check_defconfig//' "$PLATFORM/common/build.config.gki"
+          sed -i '/file_localversion/s/echo ".*"/echo "${KERNELVERSION}${{ env.KERNEL_NAME }}"/' "$COMMON/scripts/setlocalversion"
+
+          sed -i '/define get_ksu_version_full/,/endef/{
+            /v\$1-/c\v$1-$(KSU_VERSION)@yoli
+          }' ../KernelSU/kernel/Makefile
+          
+          cat <<EOF >> "$DEFCONFIG"
+          CONFIG_LTO_CLANG_THIN=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=n
+          CONFIG_KSU_SUSFS_ENABLE_LOG=n
+          CONFIG_KSU_MANUAL_HOOK=y
+          CONFIG_KSU_SUSFS_SUS_SU=n
+          EOF
+
+      - name: Build Kernel
+        run: |
+          cd "$COMMON"
+          
+          PREBUILT_CLANG="$PLATFORM/prebuilts/clang/host/linux-x86/clang-r510928/bin"
+          PREBUILT_RUST="$PLATFORM/prebuilts/rust/linux-x86/1.73.0b/bin"
+          PREBUILT_BUILD_TOOLS_BIN="$PLATFORM/prebuilts/build-tools/linux-x86/bin"
+          KERNEL_TOOLS_BIN="$PLATFORM/prebuilts/kernel-build-tools/linux-x86/bin"
+          KERNEL_TOOLS_LIB="$PLATFORM/prebuilts/kernel-build-tools/linux-x86/lib64"
+          KERNEL_TOOLS_INCLUDE="$PLATFORM/prebuilts/kernel-build-tools/linux-x86/include"
+
+          PATH="/usr/lib/ccache:$PREBUILT_CLANG:$PREBUILT_RUST:$KERNEL_TOOLS_BIN:$PREBUILT_BUILD_TOOLS_BIN:$PATH"
+          
+          export KBUILD_BUILD_TIMESTAMP=$(date -d "${{ env.KERNEL_TIME }}" -u "+%a %b %d %H:%M:%S %Z %Y")
+          export SOURCE_DATE_EPOCH=$(date -d "${{ env.KERNEL_TIME }}" +%s)
+          export KBUILD_BUILD_USER="kleaf"
+          export KBUILD_BUILD_HOST="build-host"
+          export LD_LIBRARY_PATH="$KERNEL_TOOLS_LIB:$LD_LIBRARY_PATH"
+          export HOSTCFLAGS="-I$KERNEL_TOOLS_INCLUDE"
+          export HOSTLDFLAGS="-L$KERNEL_TOOLS_LIB"
+
+          BUILD_ARGS=(
+            "-j$(nproc --all)"
+            "ARCH=arm64"
+            "LLVM=1"
+            "O=out"
+            "CROSS_COMPILE=aarch64-linux-gnu-"
+            "CCACHE=1"
+          )
+          
+          make "${BUILD_ARGS[@]}" gki_defconfig Image
+
+      - name: Package Kernel
+        run: |
+          git clone https://github.com/Kernel-SU/AnyKernel3.git --depth=1 "$WORKSPACE/AnyKernel3" > /dev/null 2>&1
+          IMAGE_FILE="$COMMON/out/arch/arm64/boot/Image"
+
+          if [ -f "$IMAGE_FILE" ]; then
+              cp "$IMAGE_FILE" "$WORKSPACE/AnyKernel3/"
+              cd "$WORKSPACE/AnyKernel3"
+              rm -rf .git
+              zip -r "$WORKSPACE/${{ env.DEVICE }}-${{ env.KSUVER }}.zip" * > /dev/null
+          else
+              exit 1
+          fi
+          ccache -s
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DEVICE }}-${{ env.KSUVER }}
+          path: ${{ env.WORKSPACE }}/AnyKernel3/*
+
+      - name: Create Release
+        if: ${{ env.RELEASE == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.KSUVER }}-${{ env.DEVICE }}
+          files: ${{ env.WORKSPACE }}/${{ env.DEVICE }}-${{ env.KSUVER }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

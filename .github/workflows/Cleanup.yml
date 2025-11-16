@@ -1,0 +1,71 @@
+name: Workflow Cleanup
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      cleanup_mode:
+        description: 'Cleanup mode'
+        required: true
+        type: choice
+        options: ['default_cleanup', 'clear_all_failures', 'clear_all_workflows']
+        default: default_cleanup
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Dependencies
+        run: pip install pygithub pytz
+      - name: Cleanup Workflows
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODE: ${{ inputs.cleanup_mode || 'default_cleanup' }}
+          CURRENT_WORKFLOW: ${{ github.workflow }}
+        run: |
+          cat << 'EOF' > cleanup.py
+          from github import Github
+          from datetime import datetime, timedelta
+          import os, pytz
+
+          mode = os.getenv('MODE', 'default_cleanup')
+          repo = Github(os.getenv('GITHUB_TOKEN')).get_repo(os.getenv('GITHUB_REPOSITORY'))
+          days = 0 if mode in ['clear_all_failures', 'clear_all_workflows'] else 3
+          cutoff = datetime.now(pytz.UTC) - timedelta(days=days)
+          status = None if mode == 'clear_all_workflows' else 'failure'
+
+          deleted = 0
+          for wf in repo.get_workflows():
+              runs = wf.get_runs() if mode != 'clear_all_failures' else wf.get_runs(status=status)
+              kept_success = kept_fail = 0
+              for run in sorted(runs, key=lambda r: r.created_at, reverse=True):
+                  if run.status in ['queued', 'in_progress']:
+                      continue
+                  if wf.name == os.getenv('CURRENT_WORKFLOW') or \
+                     mode != 'default_cleanup' or \
+                     run.conclusion == 'cancelled' or \
+                     (run.conclusion == 'success' and kept_success >= 5) or \
+                     (run.conclusion == 'failure' and kept_fail >= 3) or \
+                     run.created_at <= cutoff:
+                      try:
+                          run.delete()
+                          deleted += 1
+                      except:
+                          continue
+                  elif run.conclusion == 'success':
+                      kept_success += 1
+                  elif run.conclusion == 'failure':
+                      kept_fail += 1
+
+          print(f"Cleanup done! Processed {repo.get_workflows().totalCount} workflows, deleted {deleted} runs")
+          EOF
+          python cleanup.py
