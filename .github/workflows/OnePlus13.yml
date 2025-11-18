@@ -147,7 +147,7 @@ jobs:
             OFFSET=$((CURRENT_COUNT - TARGET_COUNT))
             
             if [ $OFFSET -lt 0 ]; then
-                echo "Error: 目标版本 $TARGET_VER 比当前 HEAD 还要新。"
+                echo "Error: 版本$TARGET_VER比当前HEAD还要新。"
                 exit 1
             fi
             
@@ -155,7 +155,7 @@ jobs:
             
             KSU_VERSION=$TARGET_VER
           else
-            echo "使用最新版本: $KSU_VERSION"
+            echo "使用版本: $KSU_VERSION"
           fi
           
           echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
@@ -168,10 +168,8 @@ jobs:
           cp -r susfs4ksu/kernel_patches/include/linux/* "$COMMON/include/linux/"
           cd "$COMMON" && patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch
 
-          curl -LO https://raw.githubusercontent.com/Numbersf/SCHED_PATCH/refs/heads/sm8750/fengchi_oneplus_13_b.patch \
-               -LO https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/hooks/scope_min_manual_hooks_v1.6.patch
+          curl -LO https://raw.githubusercontent.com/Numbersf/SCHED_PATCH/refs/heads/sm8750/fengchi_oneplus_13_b.patch
           patch -p1 -F 3 < fengchi_oneplus_13_b.patch
-          patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch
 
           rm -f $PLATFORM/common/android/abi_gki_protected_exports_* \
                 $PLATFORM/msm-kernel/android/abi_gki_protected_exports_*
@@ -187,8 +185,6 @@ jobs:
           CONFIG_LTO_CLANG_THIN=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME=n
           CONFIG_KSU_SUSFS_ENABLE_LOG=n
-          CONFIG_KSU_MANUAL_HOOK=y
-          CONFIG_KSU_SUSFS_SUS_SU=n
           EOF
 
       - name: Build Kernel
